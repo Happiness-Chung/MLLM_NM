@@ -37,6 +37,7 @@ import torch
 import transformers
 import tokenizers
 import deepspeed
+from peft import PeftModel
 
 from transformers import AutoConfig
 from transformers import LlamaConfig
@@ -183,6 +184,7 @@ class TrainingArguments(transformers.TrainingArguments):
     verbose_logging: bool = field(default=False)
     attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
     per_device_train_batch_size: int = 16
+    batch_size: int = 2
 
 
 # @dataclass
@@ -819,6 +821,105 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
         labels=targets,
     )
 
+def preprocess_test(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
+    conv = conversation_lib.default_conversation.copy()
+    conv.system = ""
+
+    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}    
+
+    # Apply prompt templates
+    input_conversations = []
+    target_conversations = []
+    
+    for i, source in enumerate(sources):
+        if roles[source[0]["from"]] != conv.roles[0]:
+            # Skip the first one if it is not from human
+            source = source[1:]
+
+        # For input (questions only)
+        input_conv = conv.copy()
+        input_conv.messages = []
+        
+        # For target (full conversation)
+        target_conv = conv.copy()
+        target_conv.messages = []
+        
+        for j, sentence in enumerate(source):
+            role = roles[sentence["from"]]
+            target_conv.append_message(role, sentence["value"])
+            if role == conv.roles[0]:  # Only add human messages to input conversation
+                input_conv.append_message(role, sentence["value"])
+
+        input_conversations.append(input_conv.get_prompt())
+        target_conversations.append(target_conv.get_prompt())
+
+    # Tokenization for input conversations
+    if has_image:
+        input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, image_token_index=IMAGE_TOKEN_INDEX, return_tensors="pt") for prompt in input_conversations], dim=0)
+    else:
+        input_ids = tokenizer(
+            input_conversations,
+            return_tensors="pt",
+            padding="longest",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        ).input_ids
+
+    # Tokenization for target conversations
+    targets = tokenizer(
+        target_conversations,
+        return_tensors="pt",
+        padding="longest",
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+    ).input_ids
+
+    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+
+    # Mask targets
+    sep = conv.sep + conv.roles[1] + ": "
+    for conversation, target in zip(target_conversations, targets):
+        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+
+        rounds = conversation.split(conv.sep2)
+        cur_len = 1
+        target[:cur_len] = IGNORE_INDEX
+        for i, rou in enumerate(rounds):
+            if rou == "":
+                break
+
+            parts = rou.split(sep)
+            if len(parts) != 2:
+                break
+            parts[0] += sep
+
+            if has_image:
+                round_len = len(tokenizer_image_token(rou, tokenizer, image_token_index=IMAGE_TOKEN_INDEX))
+                instruction_len = len(tokenizer_image_token(parts[0], tokenizer, image_token_index=IMAGE_TOKEN_INDEX)) - 2
+            else:
+                round_len = len(tokenizer(rou).input_ids)
+                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+
+            if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+                round_len -= 1
+                instruction_len -= 1
+
+            target[cur_len: cur_len + instruction_len] = IGNORE_INDEX
+
+            cur_len += round_len
+        target[cur_len:] = IGNORE_INDEX
+
+        if cur_len < tokenizer.model_max_length:
+            if cur_len != total_len:
+                target[:] = IGNORE_INDEX
+                print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
+
+    return dict(
+        input_ids=input_ids,
+        labels=targets,
+    )
+
+
 
 def preprocess_mpt(sources, tokenizer: transformers.PreTrainedTokenizer, has_image: bool = False) -> Dict:
     conv = conversation_lib.default_conversation.copy()
@@ -940,6 +1041,7 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
         return preprocess_llama_2(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version.startswith("v1"):
         # print("##################################v1")
+        # return preprocess_test(sources, tokenizer, has_image=has_image)
         return preprocess_v1(sources, tokenizer, has_image=has_image)
     if conversation_lib.default_conversation.version == "mpt":
         # print("##################################mpt")
@@ -970,9 +1072,6 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
     else:
         conversations_tokenized = _tokenize_fn(conversations, tokenizer)
         input_ids = conversations_tokenized["input_ids"]
-
-    print("########################################")
-    print("input_ids: ", input_ids)
 
     targets = copy.deepcopy(input_ids)
     for target, source in zip(targets, sources):
@@ -1511,7 +1610,7 @@ def train(attn_implementation=None):
     default_output_dir = "/home/hb0522/MLLM/LLaVA-NeXT/results"
     # TrainingArguments.output_dir = default_output_dir
 
-    parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
+    parser = transformers.HfArgumentParser((ModelArguments, TestDataArguments, TrainingArguments))
     parser.output_dir = "/root/MLLM/LLaVA-NeXT/results"
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -1755,9 +1854,11 @@ def train(attn_implementation=None):
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     trainer.create_optimizer()
+    test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         print("-------------------------------------Resume")
+        trainer.predict(test_dataset)
         trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-38015")
     else:
         print("-------------------------------------New-Start")
@@ -1793,27 +1894,34 @@ def train(attn_implementation=None):
 
     rank0_print(f"Model saved to {training_args.output_dir}")
 
-def test():
+def test(attn_implementation=None):
+    global local_rank
 
-    # 평가에 사용할 모델 디렉토리 설정
-    output_dir = "/home/hb0522/MLLM/LLaVA-NeXT/results"
-    adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/"  # LoRA Adapter의 경로
-    non_lora_trainables_path = "/root/MLLM/LLaVA-NeXT/results/non_lora_trainables.bin"  # non_lora_trainables.bin의 경로
+    ### login
+    login(token="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")
 
     parser = transformers.HfArgumentParser((ModelArguments, TestDataArguments, TrainingArguments))
     parser.output_dir = "/root/MLLM/LLaVA-NeXT/results"
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+    training_args.per_device_eval_batch_size = 2
+
+    if training_args.verbose_logging:
+        rank0_print(f"Inspecting experiment hyperparameters:\n")
+        rank0_print(f"model_args = {vars(model_args)}\n\n")
+        rank0_print(f"data_args = {vars(data_args)}\n\n")
+        rank0_print(f"training_args = {vars(training_args)}\n\n")
+        # rank0_print(f"evaluation_args = {vars(evaluation_args)}\n\n")
+
+    local_rank = training_args.local_rank
+    # compute_dtype = torch.float16 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)
+    compute_dtype = torch.bfloat16
 
     bnb_model_from_pretrained_args = {}
     if training_args.bits in [4, 8]:
         from transformers import BitsAndBytesConfig
-        
-        compute_dtype = torch.bfloat16
+
         bnb_model_from_pretrained_args.update(
             dict(
-                # device_map="auto",
-                # load_in_4bit=training_args.bits == 4,
-                # load_in_8bit=training_args.bits == 8,
                 quantization_config=BitsAndBytesConfig(
                     load_in_4bit=training_args.bits == 4,
                     load_in_8bit=training_args.bits == 8,
@@ -1826,22 +1934,33 @@ def test():
             )
         )
 
-    customized_kwargs = dict()
-    customized_kwargs.update(bnb_model_from_pretrained_args)
-    cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
-    customized_kwargs["config"] = cfg_pretrained
+    model = get_model(model_args, training_args, bnb_model_from_pretrained_args)
+    model.config.use_cache = False
+    if model_args.rope_scaling_factor is not None and model_args.rope_scaling_type is not None:
+        model.config.rope_scaling = {
+            "factor": model_args.rope_scaling_factor,
+            "type": model_args.rope_scaling_type,
+        }
 
-    # 모델과 토크나이저 로드
-    model = LlavaLlamaForCausalLM.from_pretrained(
-                model_args.model_name_or_path,
-                cache_dir=training_args.cache_dir,
-                attn_implementation=training_args.attn_implementation,
-                torch_dtype= (torch.bfloat16), # if training_args.bf16 else torch.float16),
-                low_cpu_mem_usage=True, # 이거를 사용하면 model이 meta tensor로 초기화
-                device_map = 'auto',
-                **customized_kwargs,
-            )
-    model.mm_create()
+    if model_args.freeze_backbone:
+        model.model.requires_grad_(False)
+
+    if training_args.bits in [4, 8]:
+        from peft import prepare_model_for_kbit_training
+
+        model.config.torch_dtype = torch.bfloat16 # torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)
+        model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
+
+    if training_args.gradient_checkpointing:
+        if hasattr(model, "enable_input_require_grads"):
+            model.enable_input_require_grads()
+        else:
+
+            def make_inputs_require_grad(module, input, output):
+                output.requires_grad_(True)
+
+            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
@@ -1849,39 +1968,270 @@ def test():
             padding_side="right",
             use_fast=False,
         )
-    
-    from peft import PeftModel, PeftConfig
-    
+
+    rank0_print(f"Prompt version: {model_args.version}")
+    if model_args.version == "v0":
+        if tokenizer.pad_token is None:
+            smart_tokenizer_and_embedding_resize(
+                special_tokens_dict=dict(pad_token="[PAD]"),
+                tokenizer=tokenizer,
+                model=model,
+            )
+    elif model_args.version == "v0.5":
+        tokenizer.pad_token = tokenizer.unk_token
+    else:
+        if tokenizer.unk_token is not None:
+            tokenizer.pad_token = tokenizer.unk_token
+        if model_args.version in conversation_lib.conv_templates:
+            conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+        else:
+            # conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+            conversation_lib.default_conversation = None
+
+    if model_args.vision_tower is not None:
+        model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
+
+        vision_tower = model.get_vision_tower()
+        vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
+
+        data_args.image_processor = vision_tower.image_processor
+        data_args.is_multimodal = True
+
+        model.config.image_aspect_ratio = data_args.image_aspect_ratio
+        if data_args.image_grid_pinpoints is not None:
+            if isinstance(data_args.image_grid_pinpoints, str) and "x" in data_args.image_grid_pinpoints:
+                try:
+                    patch_size = data_args.image_processor.size[0]
+                except Exception as e:
+                    patch_size = data_args.image_processor.size["shortest_edge"]
+
+                assert patch_size in [224, 336, 384, 448, 512], "patch_size should be in [224, 336, 384, 448, 512]"
+                # Use regex to extract the range from the input string
+                matches = re.findall(r"\((\d+)x(\d+)\)", data_args.image_grid_pinpoints)
+                range_start = tuple(map(int, matches[0]))
+                range_end = tuple(map(int, matches[-1]))
+                # Generate a matrix of tuples from (range_start[0], range_start[1]) to (range_end[0], range_end[1])
+                grid_pinpoints = [(i, j) for i in range(range_start[0], range_end[0] + 1) for j in range(range_start[1], range_end[1] + 1)]
+                # Multiply all elements by patch_size
+                data_args.image_grid_pinpoints = [[dim * patch_size for dim in pair] for pair in grid_pinpoints]
+            elif isinstance(data_args.image_grid_pinpoints, str):
+                data_args.image_grid_pinpoints = ast.literal_eval(data_args.image_grid_pinpoints)
+
+        model.config.image_grid_pinpoints = data_args.image_grid_pinpoints
+        model.config.image_crop_resolution = data_args.image_crop_resolution
+        model.config.image_split_resolution = data_args.image_split_resolution
+        model.config.tokenizer_padding_side = tokenizer.padding_side
+        model.config.tokenizer_model_max_length = tokenizer.model_max_length
+        model.config.mm_newline_position = model_args.mm_newline_position
+
+        model.get_model().mm_projector.to(dtype=torch.bfloat16, device=training_args.device)
+
+        model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+        model.config.mm_projector_lr = training_args.mm_projector_lr
+        model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
+        training_args.use_im_start_end = model_args.mm_use_im_start_end
+        model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+        model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+
+    if training_args.bits in [4, 8]:
+        from peft.tuners.lora import LoraLayer
+
+        for name, module in model.named_modules():
+            if isinstance(module, LoraLayer):
+                if training_args.bf16:
+                    module = module.to(torch.bfloat16)
+            if "norm" in name:
+                module = module.to(torch.bfloat16) ###
+            if "lm_head" in name or "embed_tokens" in name:
+                if hasattr(module, "weight"):
+                    if training_args.bf16 and module.weight.dtype == torch.float32:
+                        module = module.to(torch.bfloat16)
+
+    adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/"  # LoRA Adapter의 경로
+    non_lora_trainables_path = "/root/MLLM/LLaVA-NeXT/results/non_lora_trainables.bin"  # non_lora_trainables.bin의 경로
+
     # LoRA adapter 적용
     model = PeftModel.from_pretrained(model, adapter_model_path)
     # non-lora trainables 로드
     non_lora_trainables = torch.load(non_lora_trainables_path)
     # 비 LoRA 파라미터를 모델에 적용
     model.load_state_dict(non_lora_trainables, strict=False)
-
-    # 데이터 준비
-    # 테스트 데이터셋을 로드하는 부분을 추가합니다.
-    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-    test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
-
-    vision_tower = model.get_vision_tower()
-    vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
-
-    data_args.image_processor = vision_tower.image_processor
-    
-    # 모델을 평가 모드로 전환
     model.eval()
 
-    # GPU가 있다면 GPU로 모델 이동
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-
+    data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
-    test_results = trainer.predict(test_dataset)
-    print(test_results.predictions)
+    test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
 
-   
-    # 평가 메트릭 계산
+
+    test_results = trainer.predict(test_dataset)       
+
+
+# def test():
+
+#     # 평가에 사용할 모델 디렉토리 설정
+#     output_dir = "/home/hb0522/MLLM/LLaVA-NeXT/results"
+#     adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/"  # LoRA Adapter의 경로
+#     non_lora_trainables_path = "/root/MLLM/LLaVA-NeXT/results/non_lora_trainables.bin"  # non_lora_trainables.bin의 경로
+
+#     parser = transformers.HfArgumentParser((ModelArguments, TestDataArguments, TrainingArguments))
+#     parser.output_dir = "/root/MLLM/LLaVA-NeXT/results"
+#     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+#     training_args.per_device_eval_batch_size = 2  # 배치 크기를 1로 줄이기
+
+
+#     bnb_model_from_pretrained_args = {}
+#     if training_args.bits in [4, 8]:
+#         from transformers import BitsAndBytesConfig
+        
+#         compute_dtype = torch.bfloat16
+#         bnb_model_from_pretrained_args.update(
+#             dict(
+#                 # device_map="auto",
+#                 # load_in_4bit=training_args.bits == 4,
+#                 # load_in_8bit=training_args.bits == 8,
+#                 quantization_config=BitsAndBytesConfig(
+#                     load_in_4bit=training_args.bits == 4,
+#                     load_in_8bit=training_args.bits == 8,
+#                     llm_int8_threshold=6.0,
+#                     llm_int8_has_fp16_weight=False,
+#                     bnb_4bit_compute_dtype=compute_dtype,
+#                     bnb_4bit_use_double_quant=training_args.double_quant,
+#                     bnb_4bit_quant_type=training_args.quant_type,  # {'fp4', 'nf4'}
+#                 ),
+#             )
+#         )
+
+#     customized_kwargs = dict()
+#     customized_kwargs.update(bnb_model_from_pretrained_args)
+#     cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
+#     customized_kwargs["config"] = cfg_pretrained
+
+#     # 모델과 토크나이저 로드
+#     model = LlavaLlamaForCausalLM.from_pretrained(
+#                 model_args.model_name_or_path,
+#                 cache_dir=training_args.cache_dir,
+#                 attn_implementation=training_args.attn_implementation,
+#                 torch_dtype= (torch.bfloat16), # if training_args.bf16 else torch.float16),
+#                 low_cpu_mem_usage=True, # 이거를 사용하면 model이 meta tensor로 초기화
+#                 device_map = 'auto',
+#                 **customized_kwargs,
+#             )
+#     model.mm_create()
+#     tokenizer = transformers.AutoTokenizer.from_pretrained(
+#             model_args.model_name_or_path,
+#             cache_dir=training_args.cache_dir,
+#             model_max_length=training_args.model_max_length,
+#             padding_side="right",
+#             use_fast=False,
+#         )
+    
+        
+    
+#     # LoRA adapter 적용
+#     model = PeftModel.from_pretrained(model, adapter_model_path)
+#     # non-lora trainables 로드
+#     non_lora_trainables = torch.load(non_lora_trainables_path)
+#     # 비 LoRA 파라미터를 모델에 적용
+#     model.load_state_dict(non_lora_trainables, strict=False)
+
+#     # 데이터 준비
+#     # 테스트 데이터셋을 로드하는 부분을 추가합니다.
+#     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
+#     test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
+
+#     vision_tower = model.get_vision_tower()
+#     vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
+
+#     data_args.image_processor = vision_tower.image_processor
+    
+#     if model_args.version == "v0":
+#         if tokenizer.pad_token is None:
+#             smart_tokenizer_and_embedding_resize(
+#                 special_tokens_dict=dict(pad_token="[PAD]"),
+#                 tokenizer=tokenizer,
+#                 model=model,
+#             )
+#     elif model_args.version == "v0.5":
+#         tokenizer.pad_token = tokenizer.unk_token
+#     else:
+#         if tokenizer.unk_token is not None:
+#             tokenizer.pad_token = tokenizer.unk_token
+#         if model_args.version in conversation_lib.conv_templates:
+#             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
+#         else:
+#             # conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+#             conversation_lib.default_conversation = None
+
+#     if model_args.vision_tower is not None:
+#         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
+
+#         vision_tower = model.get_vision_tower()
+#         vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
+
+#         data_args.image_processor = vision_tower.image_processor
+#         data_args.is_multimodal = True
+
+#         model.config.image_aspect_ratio = data_args.image_aspect_ratio
+#         if data_args.image_grid_pinpoints is not None:
+#             if isinstance(data_args.image_grid_pinpoints, str) and "x" in data_args.image_grid_pinpoints:
+#                 try:
+#                     patch_size = data_args.image_processor.size[0]
+#                 except Exception as e:
+#                     patch_size = data_args.image_processor.size["shortest_edge"]
+
+#                 assert patch_size in [224, 336, 384, 448, 512], "patch_size should be in [224, 336, 384, 448, 512]"
+#                 # Use regex to extract the range from the input string
+#                 matches = re.findall(r"\((\d+)x(\d+)\)", data_args.image_grid_pinpoints)
+#                 range_start = tuple(map(int, matches[0]))
+#                 range_end = tuple(map(int, matches[-1]))
+#                 # Generate a matrix of tuples from (range_start[0], range_start[1]) to (range_end[0], range_end[1])
+#                 grid_pinpoints = [(i, j) for i in range(range_start[0], range_end[0] + 1) for j in range(range_start[1], range_end[1] + 1)]
+#                 # Multiply all elements by patch_size
+#                 data_args.image_grid_pinpoints = [[dim * patch_size for dim in pair] for pair in grid_pinpoints]
+#             elif isinstance(data_args.image_grid_pinpoints, str):
+#                 data_args.image_grid_pinpoints = ast.literal_eval(data_args.image_grid_pinpoints)
+
+#         model.config.image_grid_pinpoints = data_args.image_grid_pinpoints
+#         model.config.image_crop_resolution = data_args.image_crop_resolution
+#         model.config.image_split_resolution = data_args.image_split_resolution
+#         model.config.tokenizer_padding_side = tokenizer.padding_side
+#         model.config.tokenizer_model_max_length = tokenizer.model_max_length
+#         model.config.mm_newline_position = model_args.mm_newline_position
+
+#         model.get_model().mm_projector.to(dtype=torch.bfloat16, device=training_args.device)
+
+#         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
+#         model.config.mm_projector_lr = training_args.mm_projector_lr
+#         model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
+#         training_args.use_im_start_end = model_args.mm_use_im_start_end
+#         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
+#         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
+
+#     if training_args.bits in [4, 8]:
+#         from peft.tuners.lora import LoraLayer
+
+#         for name, module in model.named_modules():
+#             if isinstance(module, LoraLayer):
+#                 if training_args.bf16:
+#                     module = module.to(torch.bfloat16)
+#             if "norm" in name:
+#                 module = module.to(torch.bfloat16) ###
+#             if "lm_head" in name or "embed_tokens" in name:
+#                 if hasattr(module, "weight"):
+#                     if training_args.bf16 and module.weight.dtype == torch.float32:
+#                         module = module.to(torch.bfloat16)
+    
+#     # 모델을 평가 모드로 전환
+#     model.eval()
+
+#     # GPU가 있다면 GPU로 모델 이동
+#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+#     model.to(device)
+
+#     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
+#     test_results = trainer.predict(test_dataset)
+#     # print(test_results.predictions)
+
 
 if __name__ == "__main__":
     # train()

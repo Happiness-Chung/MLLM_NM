@@ -474,6 +474,10 @@ class LLaVATrainer(Trainer):
         else:
             super(LLaVATrainer, self)._save(output_dir, state_dict)
 
+    import os
+
+    
+
 
 class LLaVADPOTrainer(DPOTrainer):
     def _get_train_sampler(self) -> Optional[torch.utils.data.Sampler]:
