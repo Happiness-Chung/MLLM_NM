@@ -123,7 +123,7 @@ class DataArguments:
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     early_mix_text: bool = False
-    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/hector2021')
+    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/PubMed')
     image_aspect_ratio: str = "square"
     image_grid_pinpoints: Optional[str] = field(default=None)
     image_crop_resolution: Optional[int] = field(default=None)
@@ -152,7 +152,8 @@ class TestDataArguments:
 @dataclass
 class TrainingArguments(transformers.TrainingArguments):
     output_dir: str = field(default="/root/MLLM/LLaVA-NeXT/results")
-    num_train_epochs: float = field(default=5.1)
+    learning_rate: float = field(default=5e-5)
+    num_train_epochs: float = field(default=10)
     bf16: bool = field(default=True)
     label_smoothing_factor: float = field(default=0.001)
     cache_dir: Optional[str] = field(default=None)
@@ -162,7 +163,7 @@ class TrainingArguments(transformers.TrainingArguments):
     freeze_mm_vision_resampler: bool = field(default=False)
     mpt_attn_impl: Optional[str] = field(default="triton")
     model_max_length: int = field(
-        default=2048,
+        default=4096,
         metadata={"help": "Maximum sequence length. Sequences will be right padded (and possibly truncated)."},
     )
     double_quant: bool = field(default=True, metadata={"help": "Compress the quantization statistics through double quantization."})
@@ -746,7 +747,8 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
     conv = conversation_lib.default_conversation.copy()
     conv.system = ""
 
-    roles = {"human": conv.roles[0], "gpt": conv.roles[1]}    
+    roles = {"human": conv.roles[0], "gpt": conv.roles[1]} 
+    # print("########################", roles)   
 
     # Apply prompt templates
     conversations = []
@@ -760,8 +762,15 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
         for j, sentence in enumerate(source):
             role = roles[sentence["from"]]
             assert role == conv.roles[j % 2], f"{i}"
-            conv.append_message(role, sentence["value"])
+            if role == "USER":
+                conv.append_message(role, sentence["value"])
+            else:
+                conv.append_message(role, sentence["value"] + " ") 
+
         conversations.append(conv.get_prompt())
+    
+    # print(conversations)
+    
 
     if has_image:
         input_ids = torch.stack([tokenizer_image_token(prompt, tokenizer, image_token_index= IMAGE_TOKEN_INDEX, return_tensors="pt") for prompt in conversations], dim=0)
@@ -776,45 +785,51 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
 
     targets = input_ids.clone()
 
-    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+    # assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
 
-    # Mask targets
-    sep = conv.sep + conv.roles[1] + ": "
-    for conversation, target in zip(conversations, targets):
-        total_len = int(target.ne(tokenizer.pad_token_id).sum())
+    # # Mask targets
+    # sep = conv.sep + conv.roles[1] + ": "
+    # # print(sep)
+    # for conversation, target in zip(conversations, targets):
+    #     total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-        rounds = conversation.split(conv.sep2)
-        cur_len = 1
-        target[:cur_len] = IGNORE_INDEX
-        for i, rou in enumerate(rounds):
-            if rou == "":
-                break
+    #     rounds = conversation.split(conv.sep2)
+    #     cur_len = 1
+    #     target[:cur_len] = IGNORE_INDEX
+    #     for i, rou in enumerate(rounds):
+    #         if rou == "":
+    #             break
 
-            parts = rou.split(sep)
-            if len(parts) != 2:
-                break
-            parts[0] += sep
+    #         parts = rou.split(sep)
+    #         # print(parts)
+    #         if len(parts) != 2:
+    #             break
+    #         parts[0] += sep
+    #         # print(parts)
 
-            if has_image:
-                round_len = len(tokenizer_image_token(rou, tokenizer, image_token_index= IMAGE_TOKEN_INDEX))
-                instruction_len = len(tokenizer_image_token(parts[0], tokenizer, image_token_index= IMAGE_TOKEN_INDEX)) - 2
-            else:
-                round_len = len(tokenizer(rou).input_ids)
-                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+    #         if has_image:
+    #             round_len = len(tokenizer_image_token(rou, tokenizer, image_token_index= IMAGE_TOKEN_INDEX))
+    #             instruction_len = len(tokenizer_image_token(parts[0], tokenizer, image_token_index= IMAGE_TOKEN_INDEX)) - 2
+    #             if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+    #                 round_len -= 1
+    #                 instruction_len -= 1
+    #             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+    #         else:
+    #             round_len = len(tokenizer(rou).input_ids)
+    #             instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-            if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
-                round_len -= 1
-                instruction_len -= 1
+    #             if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+    #                 round_len -= 1
+    #                 instruction_len -= 1
+    #         # target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
-            target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+    #         cur_len += round_len
+    #     target[cur_len:] = IGNORE_INDEX
 
-            cur_len += round_len
-        target[cur_len:] = IGNORE_INDEX
-
-        if cur_len < tokenizer.model_max_length:
-            if cur_len != total_len:
-                target[:] = IGNORE_INDEX
-                print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
+    #     if cur_len < tokenizer.model_max_length:
+    #         if cur_len != total_len:
+    #             target[:] = IGNORE_INDEX
+    #             print(f"WARNING: tokenization mismatch: {cur_len} vs. {total_len}." f" (ignored)")
 
     return dict(
         input_ids=input_ids,
@@ -1081,9 +1096,6 @@ def preprocess(sources: Sequence[str], tokenizer: transformers.PreTrainedTokeniz
             tokenized_lens = _tokenize_fn([header] + [s["value"] for s in source], tokenizer)["input_ids_lens"]
         speakers = [sentence["from"] for sentence in source]
         _mask_targets(target, tokenized_lens, speakers)
-
-    print("########################################")
-    print("masked_target: ", target)
 
     debug = True
 
@@ -1610,7 +1622,7 @@ def train(attn_implementation=None):
     default_output_dir = "/home/hb0522/MLLM/LLaVA-NeXT/results"
     # TrainingArguments.output_dir = default_output_dir
 
-    parser = transformers.HfArgumentParser((ModelArguments, TestDataArguments, TrainingArguments))
+    parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     parser.output_dir = "/root/MLLM/LLaVA-NeXT/results"
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -1708,6 +1720,7 @@ def train(attn_implementation=None):
             model_args.model_name_or_path,
             cache_dir=training_args.cache_dir,
             model_max_length=training_args.model_max_length,
+            truncation=True,
             padding_side="right",
             use_fast=False,
         )
@@ -1730,7 +1743,7 @@ def train(attn_implementation=None):
         if model_args.version in conversation_lib.conv_templates:
             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
         else:
-            # conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
+            conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
             conversation_lib.default_conversation = None
 
     if model_args.vision_tower is not None:
@@ -1856,10 +1869,12 @@ def train(attn_implementation=None):
     trainer.create_optimizer()
     test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
 
+    print(f"########################Model's max position embeddings: {model.config.max_position_embeddings}")
+
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         print("-------------------------------------Resume")
-        trainer.predict(test_dataset)
-        trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-38015")
+        trainer.train()
+        # trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-38015")
     else:
         print("-------------------------------------New-Start")
         trainer.train()
@@ -2063,7 +2078,7 @@ def test(attn_implementation=None):
     test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
 
 
-    test_results = trainer.predict(test_dataset)       
+    trainer.predict(test_dataset)       
 
 
 # def test():
@@ -2234,5 +2249,5 @@ def test(attn_implementation=None):
 
 
 if __name__ == "__main__":
-    # train()
+    train()
     test()
