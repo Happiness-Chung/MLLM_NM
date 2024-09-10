@@ -72,9 +72,11 @@ class CLIPVisionTower(nn.Module):
                 image_feature = self.feature_select(image_forward_out).to(image.dtype)
                 image_features.append(image_feature)
         else:
-            images = images.bfloat16()
+            # print(images)
+            # images = images.bfloat16()
             # self.dtype = torch.bfloat16
-            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=torch.bfloat16), output_hidden_states=True)
+            # print("Shape: ", images.shape)
+            image_forward_outs = self.vision_tower(images.to(device=self.device, dtype=torch.bfloat16), output_hidden_states=True) # 
             image_features = self.feature_select(image_forward_outs).to(images.dtype)
 
         return image_features
@@ -126,7 +128,7 @@ class CLIPVisionTower(nn.Module):
 class CLIPVisionTowerS2(CLIPVisionTower):
     def __init__(self, vision_tower, args, delay_load=False):
 
-        self.s2_scales = getattr(args, "s2_scales", "336,672,1008")
+        self.s2_scales = getattr(args, "s2_scales", "224, 336,672,1008")
         self.s2_scales = list(map(int, self.s2_scales.split(",")))
         self.s2_scales.sort()
         self.s2_split_size = self.s2_scales[0]

@@ -108,7 +108,7 @@ class ModelArguments:
     rope_scaling_type: Optional[str] = field(default=None)
 
     s2: Optional[bool] = field(default=False)
-    s2_scales: Optional[str] = field(default="336,672,1008")
+    s2_scales: Optional[str] = field(default="224, 336,672,1008")
 
     use_pos_skipping: Optional[bool] = field(default=False)
     pos_skipping_range: Optional[int] = field(default=4096)
@@ -119,11 +119,12 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_train.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
+    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_train_image.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
+    test_data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_test_image.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     early_mix_text: bool = False
-    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/PubMed')
+    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/hector2021')
     image_aspect_ratio: str = "square"
     image_grid_pinpoints: Optional[str] = field(default=None)
     image_crop_resolution: Optional[int] = field(default=None)
@@ -135,7 +136,7 @@ class DataArguments:
 
 @dataclass
 class TestDataArguments:
-    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_test.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
+    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_test_image.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     early_mix_text: bool = False
@@ -153,7 +154,7 @@ class TestDataArguments:
 class TrainingArguments(transformers.TrainingArguments):
     output_dir: str = field(default="/root/MLLM/LLaVA-NeXT/results")
     learning_rate: float = field(default=5e-5)
-    num_train_epochs: float = field(default=10)
+    num_train_epochs: float = field(default=2)
     bf16: bool = field(default=True)
     label_smoothing_factor: float = field(default=0.001)
     cache_dir: Optional[str] = field(default=None)
@@ -785,46 +786,51 @@ def preprocess_v1(sources, tokenizer: transformers.PreTrainedTokenizer, has_imag
 
     targets = input_ids.clone()
 
-    # assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
+    # invalid_range = (targets < 0) | (targets >= 32000)
+    # invalid_indices = torch.nonzero(invalid_range)
+    # targets[invalid_indices] = IGNORE_INDEX
 
-    # # Mask targets
-    # sep = conv.sep + conv.roles[1] + ": "
-    # # print(sep)
-    # for conversation, target in zip(conversations, targets):
-    #     total_len = int(target.ne(tokenizer.pad_token_id).sum())
+    assert conv.sep_style == conversation_lib.SeparatorStyle.TWO
 
-    #     rounds = conversation.split(conv.sep2)
-    #     cur_len = 1
-    #     target[:cur_len] = IGNORE_INDEX
-    #     for i, rou in enumerate(rounds):
-    #         if rou == "":
-    #             break
+    # Mask targets
+    sep = conv.sep + conv.roles[1] + ": "
+    # print(sep)
+    for conversation, target in zip(conversations, targets):
+        total_len = int(target.ne(tokenizer.pad_token_id).sum())
 
-    #         parts = rou.split(sep)
+        rounds = conversation.split(conv.sep2)
+        cur_len = 1
+        # target[:cur_len] = IGNORE_INDEX ## original
+        target[8] = IGNORE_INDEX
+        for i, rou in enumerate(rounds):
+            if rou == "":
+                break
+
+            parts = rou.split(sep)
+            # print(parts)
+            if len(parts) != 2:
+                break
+            parts[0] += sep
     #         # print(parts)
-    #         if len(parts) != 2:
-    #             break
-    #         parts[0] += sep
-    #         # print(parts)
 
-    #         if has_image:
-    #             round_len = len(tokenizer_image_token(rou, tokenizer, image_token_index= IMAGE_TOKEN_INDEX))
-    #             instruction_len = len(tokenizer_image_token(parts[0], tokenizer, image_token_index= IMAGE_TOKEN_INDEX)) - 2
-    #             if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
-    #                 round_len -= 1
-    #                 instruction_len -= 1
-    #             target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
-    #         else:
-    #             round_len = len(tokenizer(rou).input_ids)
-    #             instruction_len = len(tokenizer(parts[0]).input_ids) - 2
+            if has_image:
+                round_len = len(tokenizer_image_token(rou, tokenizer, image_token_index= IMAGE_TOKEN_INDEX))
+                instruction_len = len(tokenizer_image_token(parts[0], tokenizer, image_token_index= IMAGE_TOKEN_INDEX)) - 2
+                if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+                    round_len -= 1
+                    instruction_len -= 1
+                # target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+            else:
+                round_len = len(tokenizer(rou).input_ids)
+                instruction_len = len(tokenizer(parts[0]).input_ids) - 2
 
-    #             if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
-    #                 round_len -= 1
-    #                 instruction_len -= 1
-    #         # target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
+                if i != 0 and not tokenizer.legacy and IS_TOKENIZER_GREATER_THAN_0_14:
+                    round_len -= 1
+                    instruction_len -= 1
+                # target[cur_len : cur_len + instruction_len] = IGNORE_INDEX
 
-    #         cur_len += round_len
-    #     target[cur_len:] = IGNORE_INDEX
+            cur_len += round_len
+        target[cur_len:] = IGNORE_INDEX
 
     #     if cur_len < tokenizer.model_max_length:
     #         if cur_len != total_len:
@@ -1246,10 +1252,10 @@ class LazySupervisedDataset(Dataset):
 
             image = expand2square(image, tuple(int(x * 255) for x in processor.image_mean))
             image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
-            # print("#################################", image.size(), image)
+            # print("#################################", image.size())
         else:
             image = processor.preprocess(image, return_tensors="pt")["pixel_values"][0]
-            # print("#################################", image.size(), image)
+            # print("#################################", image.size())
 
         # Convert the image to half precision
         image = image.half()
@@ -1867,17 +1873,19 @@ def train(attn_implementation=None):
     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     trainer.create_optimizer()
-    test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
-
+    
     print(f"########################Model's max position embeddings: {model.config.max_position_embeddings}")
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         print("-------------------------------------Resume")
-        trainer.train()
-        # trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-38015")
+        trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-15206")
+        test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.test_data_path, data_args=data_args)
+        trainer.predict(test_dataset)
     else:
         print("-------------------------------------New-Start")
         trainer.train()
+        test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.test_data_path, data_args=data_args)
+        trainer.predict(test_dataset)
     trainer.save_state()
 
     model.config.use_cache = True
@@ -1966,23 +1974,27 @@ def test(attn_implementation=None):
         model.config.torch_dtype = torch.bfloat16 # torch.float32 if training_args.fp16 else (torch.bfloat16 if training_args.bf16 else torch.float32)
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=training_args.gradient_checkpointing)
 
-    if training_args.gradient_checkpointing:
-        if hasattr(model, "enable_input_require_grads"):
-            model.enable_input_require_grads()
-        else:
+    # if training_args.gradient_checkpointing:
+    #     if hasattr(model, "enable_input_require_grads"):
+    #         model.enable_input_require_grads()
+    #     else:
 
-            def make_inputs_require_grad(module, input, output):
-                output.requires_grad_(True)
+    #         def make_inputs_require_grad(module, input, output):
+    #             output.requires_grad_(True)
 
-            model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
+    #         model.get_input_embeddings().register_forward_hook(make_inputs_require_grad)
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-            model_args.model_name_or_path,
-            cache_dir=training_args.cache_dir,
-            model_max_length=training_args.model_max_length,
-            padding_side="right",
-            use_fast=False,
-        )
+    from transformers import AutoTokenizer, LlamaTokenizer
+        
+    model_path = "lmsys/vicuna-7b-v1.5"
+    tokenizer = LlamaTokenizer.from_pretrained(
+        model_path,
+        cache_dir=None,
+        model_max_length=4096,
+        truncation=True,
+        padding_side="right",
+        use_fast=False,
+    )
 
     rank0_print(f"Prompt version: {model_args.version}")
     if model_args.version == "v0":
@@ -2062,7 +2074,7 @@ def test(attn_implementation=None):
                     if training_args.bf16 and module.weight.dtype == torch.float32:
                         module = module.to(torch.bfloat16)
 
-    adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/"  # LoRA Adapter의 경로
+    adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/checkpoint-15206/"  # LoRA Adapter의 경로
     non_lora_trainables_path = "/root/MLLM/LLaVA-NeXT/results/non_lora_trainables.bin"  # non_lora_trainables.bin의 경로
 
     # LoRA adapter 적용
@@ -2077,177 +2089,11 @@ def test(attn_implementation=None):
     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
     test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
 
-
-    trainer.predict(test_dataset)       
-
-
-# def test():
-
-#     # 평가에 사용할 모델 디렉토리 설정
-#     output_dir = "/home/hb0522/MLLM/LLaVA-NeXT/results"
-#     adapter_model_path = "/root/MLLM/LLaVA-NeXT/results/"  # LoRA Adapter의 경로
-#     non_lora_trainables_path = "/root/MLLM/LLaVA-NeXT/results/non_lora_trainables.bin"  # non_lora_trainables.bin의 경로
-
-#     parser = transformers.HfArgumentParser((ModelArguments, TestDataArguments, TrainingArguments))
-#     parser.output_dir = "/root/MLLM/LLaVA-NeXT/results"
-#     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-#     training_args.per_device_eval_batch_size = 2  # 배치 크기를 1로 줄이기
-
-
-#     bnb_model_from_pretrained_args = {}
-#     if training_args.bits in [4, 8]:
-#         from transformers import BitsAndBytesConfig
-        
-#         compute_dtype = torch.bfloat16
-#         bnb_model_from_pretrained_args.update(
-#             dict(
-#                 # device_map="auto",
-#                 # load_in_4bit=training_args.bits == 4,
-#                 # load_in_8bit=training_args.bits == 8,
-#                 quantization_config=BitsAndBytesConfig(
-#                     load_in_4bit=training_args.bits == 4,
-#                     load_in_8bit=training_args.bits == 8,
-#                     llm_int8_threshold=6.0,
-#                     llm_int8_has_fp16_weight=False,
-#                     bnb_4bit_compute_dtype=compute_dtype,
-#                     bnb_4bit_use_double_quant=training_args.double_quant,
-#                     bnb_4bit_quant_type=training_args.quant_type,  # {'fp4', 'nf4'}
-#                 ),
-#             )
-#         )
-
-#     customized_kwargs = dict()
-#     customized_kwargs.update(bnb_model_from_pretrained_args)
-#     cfg_pretrained = AutoConfig.from_pretrained(model_args.model_name_or_path)
-#     customized_kwargs["config"] = cfg_pretrained
-
-#     # 모델과 토크나이저 로드
-#     model = LlavaLlamaForCausalLM.from_pretrained(
-#                 model_args.model_name_or_path,
-#                 cache_dir=training_args.cache_dir,
-#                 attn_implementation=training_args.attn_implementation,
-#                 torch_dtype= (torch.bfloat16), # if training_args.bf16 else torch.float16),
-#                 low_cpu_mem_usage=True, # 이거를 사용하면 model이 meta tensor로 초기화
-#                 device_map = 'auto',
-#                 **customized_kwargs,
-#             )
-#     model.mm_create()
-#     tokenizer = transformers.AutoTokenizer.from_pretrained(
-#             model_args.model_name_or_path,
-#             cache_dir=training_args.cache_dir,
-#             model_max_length=training_args.model_max_length,
-#             padding_side="right",
-#             use_fast=False,
-#         )
-    
-        
-    
-#     # LoRA adapter 적용
-#     model = PeftModel.from_pretrained(model, adapter_model_path)
-#     # non-lora trainables 로드
-#     non_lora_trainables = torch.load(non_lora_trainables_path)
-#     # 비 LoRA 파라미터를 모델에 적용
-#     model.load_state_dict(non_lora_trainables, strict=False)
-
-#     # 데이터 준비
-#     # 테스트 데이터셋을 로드하는 부분을 추가합니다.
-#     data_module = make_supervised_data_module(tokenizer=tokenizer, data_args=data_args)
-#     test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.data_path, data_args=data_args)
-
-#     vision_tower = model.get_vision_tower()
-#     vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
-
-#     data_args.image_processor = vision_tower.image_processor
-    
-#     if model_args.version == "v0":
-#         if tokenizer.pad_token is None:
-#             smart_tokenizer_and_embedding_resize(
-#                 special_tokens_dict=dict(pad_token="[PAD]"),
-#                 tokenizer=tokenizer,
-#                 model=model,
-#             )
-#     elif model_args.version == "v0.5":
-#         tokenizer.pad_token = tokenizer.unk_token
-#     else:
-#         if tokenizer.unk_token is not None:
-#             tokenizer.pad_token = tokenizer.unk_token
-#         if model_args.version in conversation_lib.conv_templates:
-#             conversation_lib.default_conversation = conversation_lib.conv_templates[model_args.version]
-#         else:
-#             # conversation_lib.default_conversation = conversation_lib.conv_templates["vicuna_v1"]
-#             conversation_lib.default_conversation = None
-
-#     if model_args.vision_tower is not None:
-#         model.get_model().initialize_vision_modules(model_args=model_args, fsdp=training_args.fsdp)
-
-#         vision_tower = model.get_vision_tower()
-#         vision_tower.to(dtype=torch.bfloat16, device=training_args.device) #  if training_args.bf16 else torch.float16, device=training_args.device)
-
-#         data_args.image_processor = vision_tower.image_processor
-#         data_args.is_multimodal = True
-
-#         model.config.image_aspect_ratio = data_args.image_aspect_ratio
-#         if data_args.image_grid_pinpoints is not None:
-#             if isinstance(data_args.image_grid_pinpoints, str) and "x" in data_args.image_grid_pinpoints:
-#                 try:
-#                     patch_size = data_args.image_processor.size[0]
-#                 except Exception as e:
-#                     patch_size = data_args.image_processor.size["shortest_edge"]
-
-#                 assert patch_size in [224, 336, 384, 448, 512], "patch_size should be in [224, 336, 384, 448, 512]"
-#                 # Use regex to extract the range from the input string
-#                 matches = re.findall(r"\((\d+)x(\d+)\)", data_args.image_grid_pinpoints)
-#                 range_start = tuple(map(int, matches[0]))
-#                 range_end = tuple(map(int, matches[-1]))
-#                 # Generate a matrix of tuples from (range_start[0], range_start[1]) to (range_end[0], range_end[1])
-#                 grid_pinpoints = [(i, j) for i in range(range_start[0], range_end[0] + 1) for j in range(range_start[1], range_end[1] + 1)]
-#                 # Multiply all elements by patch_size
-#                 data_args.image_grid_pinpoints = [[dim * patch_size for dim in pair] for pair in grid_pinpoints]
-#             elif isinstance(data_args.image_grid_pinpoints, str):
-#                 data_args.image_grid_pinpoints = ast.literal_eval(data_args.image_grid_pinpoints)
-
-#         model.config.image_grid_pinpoints = data_args.image_grid_pinpoints
-#         model.config.image_crop_resolution = data_args.image_crop_resolution
-#         model.config.image_split_resolution = data_args.image_split_resolution
-#         model.config.tokenizer_padding_side = tokenizer.padding_side
-#         model.config.tokenizer_model_max_length = tokenizer.model_max_length
-#         model.config.mm_newline_position = model_args.mm_newline_position
-
-#         model.get_model().mm_projector.to(dtype=torch.bfloat16, device=training_args.device)
-
-#         model.config.mm_use_im_start_end = data_args.mm_use_im_start_end = model_args.mm_use_im_start_end
-#         model.config.mm_projector_lr = training_args.mm_projector_lr
-#         model.config.mm_vision_tower_lr = training_args.mm_vision_tower_lr
-#         training_args.use_im_start_end = model_args.mm_use_im_start_end
-#         model.config.mm_use_im_patch_token = model_args.mm_use_im_patch_token
-#         model.initialize_vision_tokenizer(model_args, tokenizer=tokenizer)
-
-#     if training_args.bits in [4, 8]:
-#         from peft.tuners.lora import LoraLayer
-
-#         for name, module in model.named_modules():
-#             if isinstance(module, LoraLayer):
-#                 if training_args.bf16:
-#                     module = module.to(torch.bfloat16)
-#             if "norm" in name:
-#                 module = module.to(torch.bfloat16) ###
-#             if "lm_head" in name or "embed_tokens" in name:
-#                 if hasattr(module, "weight"):
-#                     if training_args.bf16 and module.weight.dtype == torch.float32:
-#                         module = module.to(torch.bfloat16)
-    
-#     # 모델을 평가 모드로 전환
-#     model.eval()
-
-#     # GPU가 있다면 GPU로 모델 이동
-#     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-#     model.to(device)
-
-#     trainer = LLaVATrainer(model=model, tokenizer=tokenizer, args=training_args, **data_module)
-#     test_results = trainer.predict(test_dataset)
-#     # print(test_results.predictions)
+    # 모델 저장하고 불러오고 위에 부분 코드까지 문제 없음 ! prediction함수가 문제임.
+    # trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-7500")
+    trainer.predict(test_dataset)
 
 
 if __name__ == "__main__":
-    train()
+    # train()
     test()

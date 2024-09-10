@@ -105,7 +105,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
 
         if inputs_embeds is None:
             (input_ids, position_ids, attention_mask, past_key_values, inputs_embeds, labels) = self.prepare_inputs_labels_for_multimodal(input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities, image_sizes)
-
+            # print(labels.size())
         if dpo_forward:
             outputs = self.model(
                 input_ids=input_ids,
@@ -124,18 +124,19 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
             return logits, labels
 
         else:
+            # print("#####################Executed forward")
             return super().forward(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
-                labels=labels,
+                labels=labels, # 여기에 이렇게 들어가는걸로 보아 티처 포싱임.
                 use_cache=use_cache,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
-            )
+            ), labels
 
     @torch.no_grad()
     def generate(
@@ -158,7 +159,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         else:
             inputs_embeds = self.get_model().embed_tokens(inputs)
 
-        print(inputs_embeds)
+        # print(inputs_embeds)
         return super().generate(position_ids=position_ids, attention_mask=attention_mask, inputs_embeds=inputs_embeds, **kwargs)
 
     def prepare_inputs_for_generation(self, input_ids, past_key_values=None, inputs_embeds=None, **kwargs):

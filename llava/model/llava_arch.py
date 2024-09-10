@@ -231,7 +231,7 @@ class LlavaMetaForCausalLM(ABC):
         return image_feature
 
     def prepare_inputs_labels_for_multimodal(self, input_ids, position_ids, attention_mask, past_key_values, labels, images, modalities=["image"], image_sizes=None):
-        # print("Executed")
+        # print("#####################Executed")
         
         vision_tower = self.get_vision_tower()
         
@@ -424,6 +424,8 @@ class LlavaMetaForCausalLM(ABC):
         # rank_print("Inserting Images embedding")
         for batch_idx, cur_input_ids in enumerate(input_ids):
             num_images = (cur_input_ids == IMAGE_TOKEN_INDEX).sum()
+            # print("####### num images: ", num_images)
+            # print(cur_input_ids)
             # num_images = 1
             # rank0_print(num_images)
             if num_images == 0:
@@ -436,18 +438,21 @@ class LlavaMetaForCausalLM(ABC):
                 continue
 
             image_token_indices = [-1] + torch.where(cur_input_ids == IMAGE_TOKEN_INDEX)[0].tolist() + [cur_input_ids.shape[0]]
+            # print(image_token_indices)
             cur_input_ids_noim = []
             cur_labels = labels[batch_idx]
             cur_labels_noim = []
             for i in range(len(image_token_indices) - 1):
                 cur_input_ids_noim.append(cur_input_ids[image_token_indices[i] + 1 : image_token_indices[i + 1]])
                 cur_labels_noim.append(cur_labels[image_token_indices[i] + 1 : image_token_indices[i + 1]])
+            # print(len(cur_input_ids_noim), len(cur_labels_noim))
             split_sizes = [x.shape[0] for x in cur_labels_noim]
             cur_input_embeds = self.get_model().embed_tokens(torch.cat(cur_input_ids_noim))
             cur_input_embeds_no_im = torch.split(cur_input_embeds, split_sizes, dim=0)
             cur_new_input_embeds = []
             cur_new_labels = []
-
+            ###########image feature를 끼워넣음
+            # print("image features: ",len(image_features))
             for i in range(num_images + 1):
                 cur_new_input_embeds.append(cur_input_embeds_no_im[i])
                 cur_new_labels.append(cur_labels_noim[i])
@@ -465,6 +470,8 @@ class LlavaMetaForCausalLM(ABC):
             # import pdb; pdb.set_trace()
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
             cur_new_labels = torch.cat(cur_new_labels)
+
+            # print(cur_new_input_embeds.size(), cur_new_labels.size())
 
             new_input_embeds.append(cur_new_input_embeds)
             new_labels.append(cur_new_labels)
@@ -529,6 +536,7 @@ class LlavaMetaForCausalLM(ABC):
             position_ids[:, split_position:] += right_add
         # import pdb; pdb.set_trace()
         # rank0_print("Finish preparing")
+        # print(new_labels, "##################new_labels")
         return None, position_ids, attention_mask, past_key_values, new_input_embeds, new_labels
 
     def initialize_vision_tokenizer(self, model_args, tokenizer):
