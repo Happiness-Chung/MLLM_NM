@@ -154,7 +154,7 @@ class TestDataArguments:
 class TrainingArguments(transformers.TrainingArguments):
     output_dir: str = field(default="/root/MLLM/LLaVA-NeXT/results")
     learning_rate: float = field(default=5e-5)
-    num_train_epochs: float = field(default=2)
+    num_train_epochs: float = field(default=1)
     bf16: bool = field(default=True)
     label_smoothing_factor: float = field(default=0.001)
     cache_dir: Optional[str] = field(default=None)
@@ -1878,7 +1878,8 @@ def train(attn_implementation=None):
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         print("-------------------------------------Resume")
-        trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-15206")
+        trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-7603")
+        # trainer.train()
         test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.test_data_path, data_args=data_args)
         trainer.predict(test_dataset)
     else:
@@ -2095,5 +2096,5 @@ def test(attn_implementation=None):
 
 
 if __name__ == "__main__":
-    # train()
-    test()
+    train()
+    # test()
