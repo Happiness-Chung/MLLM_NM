@@ -66,7 +66,8 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         # Initialize weights and apply final processing
         self.post_init()
 
-        # self.model.mm_projector = self.model.mm_projector.to("cuda")
+        # for param in self.model.mm_projector.parameters():
+        #    param.requires_grad = False
         # self.model.mm_projector = mm_projector.to("cuda").to(dtype=torch.bfloat16)
 
     def mm_create(self):
@@ -82,6 +83,7 @@ class LlavaLlamaForCausalLM(LlamaForCausalLM, LlavaMetaForCausalLM):
         return self.model.to(torch.bfloat16)
     
     def get_projector(self): # 이게 지금 호출이 되기는 함. 근데 새로 정의된게 반환이 안되고 기존에 있는게 반환됨.. ;
+        # return self.mm_projector_new.to('cuda').to(torch.bfloat16)
         return self.mm_projector_new.to('cuda').to(torch.bfloat16)
 
     def forward(

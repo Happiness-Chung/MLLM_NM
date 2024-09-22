@@ -119,8 +119,8 @@ class ModelArguments:
 
 @dataclass
 class DataArguments:
-    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_train_image.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
-    test_data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_test_image.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
+    data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_train.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
+    test_data_path: str = field(default='/root/MLLM/LLaVA-NeXT/Data/Conversations_hector2D_test.json', metadata={"help": "Path to the training data, in llava's instruction.json format. Supporting multiple json files via /path/to/{a,b,c}.json"})
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     early_mix_text: bool = False
@@ -140,7 +140,7 @@ class TestDataArguments:
     lazy_preprocess: bool = False
     is_multimodal: bool = False
     early_mix_text: bool = False
-    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/hector2021')
+    image_folder: Optional[str] = field(default='/root/MLLM/LLaVA-NeXT/Data/autoPET')
     image_aspect_ratio: str = "square"
     image_grid_pinpoints: Optional[str] = field(default=None)
     image_crop_resolution: Optional[int] = field(default=None)
@@ -154,7 +154,7 @@ class TestDataArguments:
 class TrainingArguments(transformers.TrainingArguments):
     output_dir: str = field(default="/root/MLLM/LLaVA-NeXT/results")
     learning_rate: float = field(default=5e-5)
-    num_train_epochs: float = field(default=0.3)
+    num_train_epochs: float = field(default=0.1)
     bf16: bool = field(default=True)
     label_smoothing_factor: float = field(default=0.001)
     cache_dir: Optional[str] = field(default=None)
@@ -171,7 +171,7 @@ class TrainingArguments(transformers.TrainingArguments):
     quant_type: str = field(default="nf4", metadata={"help": "Quantization data type to use. Should be one of `fp4` or `nf4`."})
     bits: int = field(default=8, metadata={"help": "How many bits to use."})
     lora_enable: bool = True
-    lora_r: int = 8
+    lora_r: int = 2
     lora_alpha: int = 16
     lora_dropout: float = 0.1
     lora_weight_path: str = ""
@@ -185,8 +185,8 @@ class TrainingArguments(transformers.TrainingArguments):
     gradient_checkpointing: bool = field(default=True)
     verbose_logging: bool = field(default=False)
     attn_implementation: str = field(default="flash_attention_2", metadata={"help": "Use transformers attention implementation."})
-    per_device_train_batch_size: int = 16
-    batch_size: int = 2
+    per_device_train_batch_size: int = 1
+    batch_size: int = 1
 
 
 # @dataclass
@@ -1561,7 +1561,7 @@ def get_model(model_args, training_args, bnb_model_from_pretrained_args):
                 device_map = 'auto',
                 **customized_kwargs,
             )
-            model.mm_create()
+            # model.mm_create() #######
             # model.to("cuda")
 
             # print("#############################################")
@@ -1878,7 +1878,8 @@ def train(attn_implementation=None):
 
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
         print("-------------------------------------Resume")
-        trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-7603")
+        # trainer.train()
+        # trainer.train(resume_from_checkpoint="/root/MLLM/LLaVA-NeXT/results/checkpoint-7603")
         test_dataset = LazySupervisedDataset(tokenizer=tokenizer, data_path=data_args.test_data_path, data_args=data_args)
         trainer.predict(test_dataset)
     else:

@@ -199,7 +199,11 @@ class LlavaMetaForCausalLM(ABC):
         # print(self.get_model()) 
         # print(self.get_model().mm_projector) 
         # print(image_features)
-        image_features = self.get_projector()(image_features)
+        # image_features = self.get_projector()(image_features) ############
+        #
+        # self.get_model().mm_projector.weight.data = self.get_model().mm_projector.state.CxB.float()
+        # with torch.cuda.amp.autocast(enabled=False):
+        image_features = self.get_model().mm_projector(image_features)
         return image_features
     
     def encode_multimodals(self, videos_or_images, video_idx_in_batch, split_sizes=None):
@@ -466,6 +470,7 @@ class LlavaMetaForCausalLM(ABC):
                     cur_new_labels.append(torch.full((cur_image_features.shape[0],), IGNORE_INDEX, device=cur_labels.device, dtype=cur_labels.dtype))
 
             cur_new_input_embeds = [x.to(self.device) for x in cur_new_input_embeds]
+            # print(cur_new_input_embeds.size())
 
             # import pdb; pdb.set_trace()
             cur_new_input_embeds = torch.cat(cur_new_input_embeds)
